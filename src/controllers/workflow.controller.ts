@@ -36,6 +36,14 @@ function toBooleanValue(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
 function toDateValue(value: unknown) {
   if (value instanceof Date) {
     return value;
@@ -120,13 +128,23 @@ function buildDecisionMessage(
   input: ReturnType<typeof mapWorkflowInput>,
   decision: ReturnType<typeof mapDecision>
 ) {
+  const selectedBecause = decision?.rationale?.selectedBecause?.join(' ');
+
   if (decision?.plan === 'PT_FIRST') {
+    if (selectedBecause) {
+      return `PT-first pathway selected. ${selectedBecause} Telehealth Physical Therapy recommended as first line of care.`;
+    }
+
     return `PT-first pathway selected. Pain score mild (${formatPainLevel(
       input?.painLevel ?? null
     )}), no red flags, no prior failed PT on record. Telehealth Physical Therapy recommended as first line of care.`;
   }
 
   if (decision?.plan === 'IMAGING_FIRST') {
+    if (selectedBecause) {
+      return `Imaging-first pathway selected. ${selectedBecause} Imaging referral recommended before conservative management.`;
+    }
+
     return `Imaging-first pathway selected. Pain score elevated (${formatPainLevel(
       input?.painLevel ?? null
     )}), or red flags present. Imaging referral recommended before conservative management.`;
@@ -189,9 +207,43 @@ function mapDecision(context: Record<string, unknown>) {
     return null;
   }
 
+  const rationale = asRecord(decision.rationale);
+  const factors = asRecord(rationale?.factors);
+  const alternatives = Array.isArray(decision.alternatives)
+    ? decision.alternatives
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => Boolean(item))
+        .map((alternative, index) => ({
+          plan: toStringValue(alternative.plan) ?? null,
+          expectedCare: toStringValue(alternative.expectedCare) ?? null,
+          ranking: toNumberValue(alternative.ranking) ?? index + 1,
+          selected: toBooleanValue(alternative.selected) ?? false,
+          notSelectedReason: toStringValue(alternative.notSelectedReason) ?? null
+        }))
+    : [];
+
+  const comparison = asRecord(decision.comparison);
+
   return {
     plan: toStringValue(decision.plan) ?? null,
-    expectedCare: toStringValue(decision.expectedCare) ?? null
+    expectedCare: toStringValue(decision.expectedCare) ?? null,
+    rationale: {
+      selectedBecause: toStringArray(rationale?.selectedBecause),
+      factors: {
+        route: toStringValue(factors?.route) ?? null,
+        painLevel: toNumberValue(factors?.painLevel) ?? null,
+        redFlags: toBooleanValue(factors?.redFlags) ?? null,
+        failedPtHistory: toBooleanValue(factors?.failedPtHistory) ?? null
+      }
+    },
+    alternatives,
+    comparison: {
+      compared: toBooleanValue(comparison?.compared) ?? alternatives.length > 0,
+      methodology: toStringValue(comparison?.methodology) ?? 'rules-v1',
+      notes:
+        toStringValue(comparison?.notes) ??
+        'Structured for future alternatives and side-by-side comparison support.'
+    }
   };
 }
 
@@ -371,17 +423,23 @@ function normalizeWorkflowLogsResponse(result: {
     })
   ];
 
-  const rawLogs = result.logs.map((log) => ({
-    id: log.id,
-    workflowId: log.workflowId,
-    traceId: log.traceId,
-    fromState: log.fromState,
-    toState: log.toState,
-    actor: log.actor,
-    narrative: log.narrative,
-    payloadSnapshot: log.payloadSnapshot,
-    createdAt: log.createdAt
-  }));
+  const rawLogs = result.logs.map((log) => {
+    const snapshot = asRecord(log.payloadSnapshot) ?? {};
+
+    return {
+      id: log.id,
+      workflowId: log.workflowId,
+      traceId: log.traceId,
+      fromState: log.fromState,
+      toState: log.toState,
+      actor: log.actor,
+      narrative: log.narrative,
+      payloadSnapshot: log.payloadSnapshot,
+      pathway: mapPathway(snapshot),
+      decision: mapDecision(snapshot),
+      createdAt: log.createdAt
+    };
+  });
 
   return {
     summary: result.summary,

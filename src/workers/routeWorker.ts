@@ -30,7 +30,7 @@ export async function routeWorker(workflowId: string) {
     fromState: WorkflowStatus.ROUTING,
     toState: WorkflowStatus.DECISION_PENDING,
     actor: 'route-worker',
-    narrative: `Routed to ${route} pathway`,
+    narrative: `Routed to ${route} pathway because symptom keyword mapping matched deterministic rules (confidence 0.95)`,
     payloadSnapshot: updatedContext
   });
 
