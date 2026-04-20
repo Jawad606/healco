@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "workers": "tsx src/workers/processor.ts",
+    "test:api": "tsx tests/api.test.ts",
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate"
   },
