@@ -4,6 +4,10 @@ type WorkflowResponse = {
   id: string;
   traceId: string;
   status: string;
+  decision: {
+    plan: string | null;
+    expectedCare: string | null;
+  } | null;
   action: {
     actualCare: string | null;
     completedAt: string | null;
@@ -358,12 +362,20 @@ async function testDecisionActionImmediateAfterRoute() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(createPayload)
   });
+  assertCondition(create.status === 202, `Create workflow failed with status ${create.status}`);
+  assertCondition(typeof create.data.workflowId === 'string', 'Create response missing workflowId');
 
   const workflowId = create.data.workflowId;
   const workflow = await pollWorkflowUntilTerminal(workflowId);
+  assertCondition(workflow.status === 'COMPLETED', `Expected COMPLETED, got ${workflow.status}`);
 
   const logs = await fetchJson<LogsResponse>(`${BASE_URL}/api/v1/workflows/${workflowId}/logs`);
+  assertCondition(logs.status === 200, `GET logs failed with status ${logs.status}`);
   const timeline = logs.data.timeline;
+  const compactLogs = logs.data.logs;
+
+  assertCondition(Array.isArray(timeline) && timeline.length >= 4, 'Timeline must contain at least 4 entries');
+  assertCondition(Array.isArray(compactLogs) && compactLogs.length === timeline.length, 'logs must align with timeline length');
 
   const routeEntry = timeline.find((e) => e.step === 'ROUTE');
   const decisionEntry = timeline.find((e) => e.step === 'DECISION');
@@ -392,6 +404,10 @@ async function testDecisionActionImmediateAfterRoute() {
     decisionEntry.decision?.plan === 'PT_FIRST',
     `Expected plan PT_FIRST, got ${decisionEntry.decision?.plan}`
   );
+  assertCondition(
+    typeof decisionEntry.decision?.expectedCare === 'string' && decisionEntry.decision.expectedCare.length > 0,
+    'DECISION expectedCare should be present'
+  );
 
   // Verify DECISION message mentions the plan
   assertCondition(
@@ -409,6 +425,24 @@ async function testDecisionActionImmediateAfterRoute() {
   assertCondition(
     decisionEntry.decision?.expectedCare === actionEntry.action?.actualCare,
     `expectedCare (${decisionEntry.decision?.expectedCare}) should match actualCare (${actionEntry.action?.actualCare})`
+  );
+
+  // Verify DECISION and ACTION entries are aligned with compact logs by index
+  const compactDecision = compactLogs.find((entry) => entry.step === 'DECISION');
+  const compactAction = compactLogs.find((entry) => entry.step === 'ACTION');
+  assertCondition(compactDecision, 'Compact logs missing DECISION step');
+  assertCondition(compactAction, 'Compact logs missing ACTION step');
+  assertCondition(
+    compactDecision.index === decisionEntry.index,
+    `DECISION index mismatch timeline=${decisionEntry.index} logs=${compactDecision.index}`
+  );
+  assertCondition(
+    compactAction.index === actionEntry.index,
+    `ACTION index mismatch timeline=${actionEntry.index} logs=${compactAction.index}`
+  );
+  assertCondition(
+    compactAction.actualCare === actionEntry.action?.actualCare,
+    `ACTION actualCare mismatch timeline=${actionEntry.action?.actualCare} logs=${compactAction.actualCare}`
   );
 
   console.log('  ✓ DECISION appears immediately after ROUTE with PT_FIRST plan');
@@ -442,11 +476,24 @@ async function testConsistencyAcrossAllSections() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(createPayload)
   });
+  assertCondition(create.status === 202, `Create workflow failed with status ${create.status}`);
+  assertCondition(typeof create.data.workflowId === 'string', 'Create response missing workflowId');
 
   const workflowId = create.data.workflowId;
 
   // Get main workflow response
   const workflowRes = await pollWorkflowUntilTerminal(workflowId);
+  assertCondition(workflowRes.status === 'COMPLETED', `Expected COMPLETED, got ${workflowRes.status}`);
+  assertCondition(workflowRes.decision?.plan === 'PT_FIRST', `Expected PT_FIRST plan, got ${workflowRes.decision?.plan}`);
+  assertCondition(
+    typeof workflowRes.decision?.expectedCare === 'string' && workflowRes.decision.expectedCare.length > 0,
+    'Main response decision.expectedCare should be present'
+  );
+  assertCondition(workflowRes.action !== null, 'Main response action should be present for completed workflow');
+  assertCondition(
+    workflowRes.action?.actualCare === workflowRes.decision?.expectedCare,
+    `Main response expectedCare (${workflowRes.decision?.expectedCare}) should match actualCare (${workflowRes.action?.actualCare})`
+  );
   const mainCompletedAt = workflowRes.timestamps.completedAt;
   const mainActionCompletedAt = workflowRes.action?.completedAt;
 
@@ -459,8 +506,12 @@ async function testConsistencyAcrossAllSections() {
 
   // Get logs response
   const logsRes = await fetchJson<LogsResponse>(`${BASE_URL}/api/v1/workflows/${workflowId}/logs`);
+  assertCondition(logsRes.status === 200, `GET logs failed with status ${logsRes.status}`);
   const timeline = logsRes.data.timeline;
   const compactLogs = logsRes.data.logs;
+
+  assertCondition(Array.isArray(timeline) && timeline.length >= 4, 'Timeline must contain at least 4 entries');
+  assertCondition(Array.isArray(compactLogs) && compactLogs.length === timeline.length, 'logs must align with timeline length');
 
   // Find ACTION entries
   const timelineAction = timeline.find((e) => e.step === 'ACTION');
@@ -493,6 +544,21 @@ async function testConsistencyAcrossAllSections() {
     );
   }
 
+  const timelineDecision = timeline.find((e) => e.step === 'DECISION');
+  assertCondition(timelineDecision, 'DECISION not found in timeline');
+  assertCondition(
+    timelineDecision.decision?.plan === workflowRes.decision?.plan,
+    `Timeline decision plan (${timelineDecision.decision?.plan}) must match main decision plan (${workflowRes.decision?.plan})`
+  );
+  assertCondition(
+    timelineDecision.decision?.expectedCare === timelineAction.action?.actualCare,
+    `Timeline decision expectedCare (${timelineDecision.decision?.expectedCare}) must match timeline action actualCare (${timelineAction.action?.actualCare})`
+  );
+  assertCondition(
+    compactLogsActionCompletedAt === timelineAction.action?.actualCare,
+    `Compact logs ACTION actualCare (${compactLogsActionCompletedAt}) must match timeline action actualCare (${timelineAction.action?.actualCare})`
+  );
+
   console.log('  ✓ Main response action.completedAt matches timestamps.completedAt');
   console.log('  ✓ Timeline action.completedAt matches main action.completedAt');
   console.log('  ✓ All completedAt values are consistent across sections');
@@ -524,13 +590,17 @@ async function testResponseCleanliness() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(createPayload)
   });
+  assertCondition(create.status === 202, `Create workflow failed with status ${create.status}`);
+  assertCondition(typeof create.data.workflowId === 'string', 'Create response missing workflowId');
 
   const workflowId = create.data.workflowId;
-  await pollWorkflowUntilTerminal(workflowId);
+  const workflow = await pollWorkflowUntilTerminal(workflowId);
+  assertCondition(workflow.status === 'COMPLETED', `Expected COMPLETED, got ${workflow.status}`);
 
   // Test 4a: Default request should NOT include rawLogs
   console.log('  [4a] rawLogs NOT included by default');
   const defaultLogs = await fetchJson<LogsResponse>(`${BASE_URL}/api/v1/workflows/${workflowId}/logs`);
+  assertCondition(defaultLogs.status === 200, `Default logs request failed with status ${defaultLogs.status}`);
   assertCondition(!('rawLogs' in defaultLogs.data), 'rawLogs should be absent by default');
   assertCondition(
     defaultLogs.data.responseMeta?.rawLogs?.included === false,
@@ -543,6 +613,7 @@ async function testResponseCleanliness() {
   const explicitNoRaw = await fetchJson<LogsResponse>(
     `${BASE_URL}/api/v1/workflows/${workflowId}/logs?include=timeline,logs,overview`
   );
+  assertCondition(explicitNoRaw.status === 200, `Logs request without raw failed with status ${explicitNoRaw.status}`);
   assertCondition(!('rawLogs' in explicitNoRaw.data), 'rawLogs should be absent when not in include');
   assertCondition(
     explicitNoRaw.data.responseMeta?.rawLogs?.included === false,
@@ -553,6 +624,7 @@ async function testResponseCleanliness() {
   // Test 4c: Explicit include=raw SHOULD include rawLogs
   console.log('  [4c] rawLogs included only when explicitly requested');
   const withRaw = await fetchJson<LogsResponse>(`${BASE_URL}/api/v1/workflows/${workflowId}/logs?include=raw`);
+  assertCondition(withRaw.status === 200, `Logs request with raw failed with status ${withRaw.status}`);
   assertCondition('rawLogs' in withRaw.data, 'rawLogs should be present when include=raw');
   assertCondition(Array.isArray(withRaw.data.rawLogs), 'rawLogs should be an array');
   assertCondition(
@@ -565,6 +637,9 @@ async function testResponseCleanliness() {
   console.log('  [4d] Timeline and logs alignment - no missing steps');
   const timelineData = defaultLogs.data.timeline;
   const logsData = defaultLogs.data.logs;
+
+  assertCondition(Array.isArray(timelineData) && timelineData.length >= 4, 'Timeline must contain at least 4 entries');
+  assertCondition(Array.isArray(logsData), 'logs must be an array');
 
   assertCondition(
     timelineData.length === logsData.length,
@@ -598,6 +673,19 @@ async function testResponseCleanliness() {
     );
   }
   console.log('    ✓ Timeline and logs perfectly aligned (index, step, at)');
+
+  const timelineDecision = timelineData.find((entry) => entry.step === 'DECISION');
+  const timelineAction = timelineData.find((entry) => entry.step === 'ACTION');
+  assertCondition(timelineDecision, 'Timeline missing DECISION step');
+  assertCondition(timelineAction, 'Timeline missing ACTION step');
+  assertCondition(
+    timelineDecision.decision?.expectedCare === timelineAction.action?.actualCare,
+    `Decision expectedCare (${timelineDecision.decision?.expectedCare}) should match action actualCare (${timelineAction.action?.actualCare})`
+  );
+  assertCondition(
+    timelineAction.action?.completedAt === workflow.timestamps.completedAt,
+    'ACTION completedAt should match top-level timestamps.completedAt'
+  );
 
   // Test 4e: Verify response metadata
   console.log('  [4e] Response metadata and sections');
