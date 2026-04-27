@@ -13,6 +13,7 @@ export class WorkflowRepository {
 
   async create(data: {
     idempotencyKey: string;
+    ingestionRunId?: string;
     traceId: string;
     status: WorkflowStatus;
     contextData: WorkflowContext;

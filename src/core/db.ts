@@ -1,9 +1,10 @@
 import { Prisma, PrismaClient } from '@prisma/client';
-import { GovernanceStep, WorkflowStatus } from './workflow-state';
+import { WorkflowStatus } from './workflow-state';
 
 type WorkflowRow = {
   id: string;
   idempotencyKey: string;
+  ingestionRunId: string | null;
   traceId: string;
   status: WorkflowStatus;
   contextData: Prisma.InputJsonValue;
@@ -17,11 +18,12 @@ type WorkflowRow = {
 
 type GovernanceRow = {
   id: string;
-  workflowId: string;
+  workflowId: string | null;
+  ingestionRunId: string | null;
   traceId: string;
-  step: GovernanceStep;
-  fromState: WorkflowStatus;
-  toState: WorkflowStatus;
+  step: string;
+  fromState: string;
+  toState: string;
   actor: string;
   title: string;
   narrative: string;
@@ -34,11 +36,72 @@ type GovernanceRow = {
   createdAt: Date;
 };
 
+type IngestionRunStatus = 'RECEIVED' | 'PARSED' | 'DETECTED' | 'COMPLETED' | 'FAILED';
+type SourceFileType = 'CSV' | 'XML';
+type IngestionRowStatus = 'VALID' | 'INVALID';
+
+type IngestionRunRow = {
+  id: string;
+  runId: string;
+  employerName: string;
+  sourceFileName: string;
+  sourceFileType: SourceFileType;
+  sourceChecksum: string;
+  status: IngestionRunStatus;
+  totalRows: number;
+  validRows: number;
+  invalidRows: number;
+  totalMskFlags: number;
+  errorSummary: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type IngestedClaimRow = {
+  id: string;
+  ingestionRunId: string;
+  rowNumber: number;
+  memberId: string | null;
+  claimId: string | null;
+  caseId: string | null;
+  diagnosisCode: string | null;
+  procedureCode: string | null;
+  utilizationType: string | null;
+  serviceDate: Date | null;
+  billedAmount: Prisma.Decimal | null;
+  paidAmount: Prisma.Decimal | null;
+  normalizedPayload: Prisma.InputJsonValue;
+  rowStatus: IngestionRowStatus;
+  rowErrors: Prisma.InputJsonValue;
+  isMskFlagged: boolean;
+  mskReason: string | null;
+  createdAt: Date;
+};
+
+type MskDetectionResultRow = {
+  id: string;
+  ingestionRunId: string;
+  detectorVersion: string;
+  totalProcessed: number;
+  mskFound: number;
+  flaggedMemberIds: Prisma.InputJsonValue;
+  flaggedCaseIds: Prisma.InputJsonValue;
+  detectionReasons: Prisma.InputJsonValue;
+  createdAt: Date;
+};
+
 type WhereInput = { id?: string; idempotencyKey?: string; status?: WorkflowStatus; workflowId?: string };
 
 const workflowRows = new Map<string, WorkflowRow>();
 const workflowKeyIndex = new Map<string, string>();
 const governanceRows: GovernanceRow[] = [];
+const ingestionRunRows = new Map<string, IngestionRunRow>();
+const ingestionRunIdIndex = new Map<string, string>();
+const ingestionChecksumIndex = new Map<string, string>();
+const ingestedClaimRows = new Map<string, IngestedClaimRow>();
+const mskDetectionRows = new Map<string, MskDetectionResultRow>();
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -61,12 +124,23 @@ function buildWorkflowRecordApi() {
 
       return null;
     },
-    async create({ data }: { data: { idempotencyKey: string; traceId: string; status: WorkflowStatus; contextData: Prisma.InputJsonValue } }) {
+    async create({
+      data
+    }: {
+      data: {
+        idempotencyKey: string;
+        ingestionRunId?: string | null;
+        traceId: string;
+        status: WorkflowStatus;
+        contextData: Prisma.InputJsonValue;
+      };
+    }) {
       const now = new Date();
       const id = `wf_${workflowRows.size + 1}`;
       const row: WorkflowRow = {
         id,
         idempotencyKey: data.idempotencyKey,
+        ingestionRunId: data.ingestionRunId ?? null,
         traceId: data.traceId,
         status: data.status,
         contextData: clone(data.contextData),
@@ -99,9 +173,29 @@ function buildWorkflowRecordApi() {
       workflowRows.set(where.id, row);
       return clone(row);
     },
-    async findMany({ where, orderBy, take, skip }: { where: { status?: WorkflowStatus }; orderBy?: { createdAt: 'asc' | 'desc' }; take?: number; skip?: number }) {
-      const rows = Array.from(workflowRows.values()).filter((row) => !where.status || row.status === where.status);
-      rows.sort((a, b) => (orderBy?.createdAt === 'asc' ? a.createdAt.getTime() - b.createdAt.getTime() : b.createdAt.getTime() - a.createdAt.getTime()));
+    async findMany({
+      where,
+      orderBy,
+      take,
+      skip
+    }: {
+      where: { status?: WorkflowStatus; ingestionRunId?: string };
+      orderBy?: { createdAt: 'asc' | 'desc' } | Array<{ createdAt?: 'asc' | 'desc'; id?: 'asc' | 'desc' }>;
+      take?: number;
+      skip?: number;
+    }) {
+      const createdAtOrder = Array.isArray(orderBy)
+        ? orderBy.find((item) => item.createdAt)?.createdAt ?? 'desc'
+        : orderBy?.createdAt ?? 'desc';
+
+      const rows = Array.from(workflowRows.values())
+        .filter((row) => !where.status || row.status === where.status)
+        .filter((row) => !where.ingestionRunId || row.ingestionRunId === where.ingestionRunId);
+      rows.sort((a, b) =>
+        createdAtOrder === 'asc'
+          ? a.createdAt.getTime() - b.createdAt.getTime()
+          : b.createdAt.getTime() - a.createdAt.getTime()
+      );
       const sliced = rows.slice(skip ?? 0, (skip ?? 0) + (take ?? rows.length));
       return clone(sliced);
     }
@@ -114,11 +208,12 @@ function buildGovernanceLogApi() {
       data
     }: {
       data: {
-        workflowId: string;
+        workflowId?: string | null;
+        ingestionRunId?: string | null;
         traceId: string;
-        step: GovernanceStep;
-        fromState: WorkflowStatus;
-        toState: WorkflowStatus;
+        step: string;
+        fromState: string;
+        toState: string;
         actor: string;
         title: string;
         narrative: string;
@@ -132,7 +227,8 @@ function buildGovernanceLogApi() {
     }) {
       const row: GovernanceRow = {
         id: `gl_${governanceRows.length + 1}`,
-        workflowId: data.workflowId,
+        workflowId: data.workflowId ?? null,
+        ingestionRunId: data.ingestionRunId ?? null,
         traceId: data.traceId,
         step: data.step,
         fromState: data.fromState,
@@ -156,13 +252,14 @@ function buildGovernanceLogApi() {
       where,
       orderBy
     }: {
-      where: { workflowId: string };
+      where: { workflowId?: string; ingestionRunId?: string };
       orderBy?: Array<{ createdAt?: 'asc' | 'desc'; id?: 'asc' | 'desc' }>;
     }) {
       const createdAtOrder = orderBy?.find((item) => item.createdAt)?.createdAt;
       const idOrder = orderBy?.find((item) => item.id)?.id;
       const rows = governanceRows
-        .filter((row) => row.workflowId === where.workflowId)
+        .filter((row) => !where.workflowId || row.workflowId === where.workflowId)
+        .filter((row) => !where.ingestionRunId || row.ingestionRunId === where.ingestionRunId)
         .sort((a, b) => {
           const createdAtDelta = a.createdAt.getTime() - b.createdAt.getTime();
           if (createdAtDelta !== 0) {
@@ -180,9 +277,156 @@ function buildGovernanceLogApi() {
   };
 }
 
+function buildIngestionRunApi() {
+  return {
+    async findUnique({ where }: { where: { runId?: string; employerName_sourceChecksum?: { employerName: string; sourceChecksum: string } } }) {
+      if (where.runId) {
+        const id = ingestionRunIdIndex.get(where.runId);
+        if (!id) return null;
+        const row = ingestionRunRows.get(id);
+        return row ? clone(row) : null;
+      }
+
+      if (where.employerName_sourceChecksum) {
+        const key = `${where.employerName_sourceChecksum.employerName}::${where.employerName_sourceChecksum.sourceChecksum}`;
+        const id = ingestionChecksumIndex.get(key);
+        if (!id) return null;
+        const row = ingestionRunRows.get(id);
+        return row ? clone(row) : null;
+      }
+
+      return null;
+    },
+    async create({
+      data
+    }: {
+      data: {
+        runId: string;
+        employerName: string;
+        sourceFileName: string;
+        sourceFileType: SourceFileType;
+        sourceChecksum: string;
+        status: IngestionRunStatus;
+      };
+    }) {
+      const now = new Date();
+      const id = `ing_${ingestionRunRows.size + 1}`;
+      const row: IngestionRunRow = {
+        id,
+        runId: data.runId,
+        employerName: data.employerName,
+        sourceFileName: data.sourceFileName,
+        sourceFileType: data.sourceFileType,
+        sourceChecksum: data.sourceChecksum,
+        status: data.status,
+        totalRows: 0,
+        validRows: 0,
+        invalidRows: 0,
+        totalMskFlags: 0,
+        errorSummary: null,
+        startedAt: now,
+        completedAt: null,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      ingestionRunRows.set(id, row);
+      ingestionRunIdIndex.set(data.runId, id);
+      ingestionChecksumIndex.set(`${data.employerName}::${data.sourceChecksum}`, id);
+      return clone(row);
+    },
+    async update({ where, data }: { where: { id: string }; data: Partial<IngestionRunRow> }) {
+      const row = ingestionRunRows.get(where.id);
+      if (!row) {
+        throw new Error(`Ingestion run ${where.id} not found`);
+      }
+
+      Object.assign(row, data, { updatedAt: new Date() });
+      ingestionRunRows.set(where.id, row);
+      return clone(row);
+    }
+  };
+}
+
+function buildIngestedClaimRecordApi() {
+  return {
+    async create({ data }: { data: Omit<IngestedClaimRow, 'id' | 'createdAt' | 'isMskFlagged' | 'mskReason'> & { isMskFlagged?: boolean; mskReason?: string | null } }) {
+      const id = `rec_${ingestedClaimRows.size + 1}`;
+      const row: IngestedClaimRow = {
+        id,
+        ...data,
+        isMskFlagged: data.isMskFlagged ?? false,
+        mskReason: data.mskReason ?? null,
+        createdAt: new Date()
+      };
+
+      ingestedClaimRows.set(id, row);
+      return clone(row);
+    },
+    async findMany({
+      where,
+      orderBy
+    }: {
+      where: { ingestionRunId: string; rowStatus?: IngestionRowStatus };
+      orderBy?: Array<{ rowNumber?: 'asc' | 'desc'; id?: 'asc' | 'desc' }>;
+    }) {
+      const rowNumberOrder = orderBy?.find((item) => item.rowNumber)?.rowNumber ?? 'asc';
+      const idOrder = orderBy?.find((item) => item.id)?.id ?? 'asc';
+      const rows = Array.from(ingestedClaimRows.values())
+        .filter((row) => row.ingestionRunId === where.ingestionRunId)
+        .filter((row) => !where.rowStatus || row.rowStatus === where.rowStatus)
+        .sort((a, b) => {
+          const rowNumberDelta = a.rowNumber - b.rowNumber;
+          if (rowNumberDelta !== 0) {
+            return rowNumberOrder === 'desc' ? -rowNumberDelta : rowNumberDelta;
+          }
+
+          if (idOrder === 'desc') {
+            return b.id.localeCompare(a.id);
+          }
+
+          return a.id.localeCompare(b.id);
+        });
+
+      return clone(rows);
+    },
+    async update({ where, data }: { where: { id: string }; data: Partial<IngestedClaimRow> }) {
+      const row = ingestedClaimRows.get(where.id);
+      if (!row) {
+        throw new Error(`Ingested claim record ${where.id} not found`);
+      }
+
+      Object.assign(row, data);
+      ingestedClaimRows.set(where.id, row);
+      return clone(row);
+    }
+  };
+}
+
+function buildMskDetectionResultApi() {
+  return {
+    async create({ data }: { data: Omit<MskDetectionResultRow, 'id' | 'createdAt'> }) {
+      const row: MskDetectionResultRow = {
+        id: `det_${mskDetectionRows.size + 1}`,
+        ...data,
+        createdAt: new Date()
+      };
+
+      mskDetectionRows.set(row.id, row);
+      return clone(row);
+    }
+  };
+}
+
 const inMemoryPrisma = {
   workflowRecord: buildWorkflowRecordApi(),
-  governanceLog: buildGovernanceLogApi()
+  governanceLog: buildGovernanceLogApi(),
+  ingestionRun: buildIngestionRunApi(),
+  ingestedClaimRecord: buildIngestedClaimRecordApi(),
+  mskDetectionResult: buildMskDetectionResultApi(),
+  async $transaction<T>(operations: Array<Promise<T>>) {
+    return Promise.all(operations);
+  }
 };
 
 declare global {

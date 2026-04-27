@@ -2,6 +2,7 @@ type Primitive = string | number | boolean | null;
 
 type WorkflowResponse = {
   id: string;
+  ingestionRunId?: string | null;
   traceId: string;
   status: string;
   decision: {
@@ -76,6 +77,52 @@ type LogsResponse = {
   };
 };
 
+type IngestionCreateResponse = {
+  ok: boolean;
+  status: number;
+  reused?: boolean;
+  runId?: string;
+  code?: string;
+  message?: string;
+  totals?: {
+    totalRows: number;
+    validRows: number;
+    invalidRows: number;
+    mskFound: number;
+  };
+  workflows?: string[];
+  failures?: Array<{ rowNumber: number; reason: string }>;
+};
+
+type IngestionSummaryResponse = {
+  ingestionRunId: string;
+  status: string;
+  totals: {
+    totalRows: number;
+    validRows: number;
+    invalidRows: number;
+    mskFound: number;
+  };
+  workflows?: Array<{
+    workflowId: string;
+    traceId: string;
+    status: string;
+    completedAt: string | null;
+    createdAt: string;
+  }>;
+  consistency?: {
+    valid: boolean;
+    idsLinked: boolean;
+    workflowCountMatchesMsk: boolean;
+    terminalWorkflowCount: number;
+    totalWorkflowCount: number;
+    errors: string[];
+  };
+  failures: Array<{ rowNumber: number; reason: string }>;
+};
+
+import { readFile } from 'node:fs/promises';
+
 const BASE_URL = process.env.API_BASE_URL ?? 'http://localhost:8000';
 const WAIT_TIMEOUT_MS = Number(process.env.API_WAIT_TIMEOUT_MS ?? 60000);
 const WAIT_INTERVAL_MS = Number(process.env.API_WAIT_INTERVAL_MS ?? 500);
@@ -116,6 +163,21 @@ async function pollWorkflowUntilTerminal(workflowId: string): Promise<WorkflowRe
   }
 
   throw new Error(`Workflow ${workflowId} did not reach terminal state within ${WAIT_TIMEOUT_MS}ms`);
+}
+
+async function uploadCsvForIngestion(
+  employerName: string,
+  fileName: string,
+  csvContent: string
+): Promise<{ status: number; data: IngestionCreateResponse }> {
+  const form = new FormData();
+  form.set('employerName', employerName);
+  form.set('file', new Blob([csvContent], { type: 'text/csv' }), fileName);
+
+  return fetchJson<IngestionCreateResponse>(`${BASE_URL}/api/v1/ingestions`, {
+    method: 'POST',
+    body: form
+  });
 }
 
 async function run() {
@@ -708,6 +770,130 @@ async function testResponseCleanliness() {
   console.log('    ✓ Response sections and metadata correct');
 }
 
+async function testWave1StableHappyPathIngestion() {
+  console.log('\n[WAVE 1] Stable Happy-Path Ingestion');
+
+  const csvSample = await readFile('claims_sample_ark_emp_1000_demo.csv', 'utf-8');
+  const employerName = `wave1_${Date.now()}`;
+
+  const upload = await uploadCsvForIngestion(
+    employerName,
+    'claims_sample_ark_emp_1000_demo.csv',
+    csvSample
+  );
+
+  assertCondition(upload.status === 202, `Wave 1 upload expected 202, got ${upload.status}`);
+  assertCondition(upload.data.ok === true, 'Wave 1 upload should return ok=true');
+  assertCondition(Boolean(upload.data.runId), 'Wave 1 upload should return runId');
+  assertCondition((upload.data.totals?.totalRows ?? 0) > 0, 'Wave 1 totalRows should be > 0');
+  assertCondition((upload.data.totals?.mskFound ?? 0) > 0, 'Wave 1 should detect at least one MSK record');
+  assertCondition((upload.data.workflows?.length ?? 0) > 0, 'Wave 1 should create at least one workflow');
+
+  const runId = String(upload.data.runId);
+  const summary = await fetchJson<IngestionSummaryResponse>(`${BASE_URL}/api/v1/ingestions/${runId}`);
+  assertCondition(summary.status === 200, `Wave 1 summary expected 200, got ${summary.status}`);
+  assertCondition(summary.data.status === 'COMPLETED', `Wave 1 run status expected COMPLETED, got ${summary.data.status}`);
+  assertCondition(summary.data.totals.totalRows === upload.data.totals?.totalRows, 'Wave 1 totals should match upload response');
+
+  const firstWorkflowId = upload.data.workflows?.[0];
+  assertCondition(Boolean(firstWorkflowId), 'Wave 1 should include at least one created workflow id');
+  const firstWorkflow = await pollWorkflowUntilTerminal(String(firstWorkflowId));
+  assertCondition(
+    firstWorkflow.status === 'COMPLETED' || firstWorkflow.status === 'FAILED',
+    `Wave 1 first workflow should be terminal, got ${firstWorkflow.status}`
+  );
+
+  console.log('  ✓ Upload, parse, detect, and workflow bridge completed');
+}
+
+async function testWave2ScenarioHardening() {
+  console.log('\n[WAVE 2] Scenario Hardening (No-MSK + Invalid File)');
+
+  const noMskCsv = [
+    'claim_id,employer_id,member_id,date_of_service,cpt_code,icd10_code,place_of_service,provider_type,billed_amount,allowed_amount,paid_amount,claim_source',
+    'clm_no_1,emp_no_msk,m_1,2026-01-10,99213,F41.1,11,PCP,100,80,70,TPA_EXPORT',
+    'clm_no_2,emp_no_msk,m_2,2026-01-11,83036,E11.9,11,PCP,120,95,88,TPA_EXPORT'
+  ].join('\n');
+
+  const noMskUpload = await uploadCsvForIngestion(
+    `wave2_nomsk_${Date.now()}`,
+    'no_msk.csv',
+    noMskCsv
+  );
+  assertCondition(noMskUpload.status === 202, `Wave 2 no-MSK upload expected 202, got ${noMskUpload.status}`);
+  assertCondition(noMskUpload.data.ok === true, 'Wave 2 no-MSK upload should return ok=true');
+  assertCondition(noMskUpload.data.totals?.mskFound === 0, `Wave 2 no-MSK should have mskFound=0, got ${noMskUpload.data.totals?.mskFound}`);
+  assertCondition((noMskUpload.data.workflows?.length ?? 0) === 0, 'Wave 2 no-MSK should create zero workflows');
+
+  const noMskSummary = await fetchJson<IngestionSummaryResponse>(
+    `${BASE_URL}/api/v1/ingestions/${String(noMskUpload.data.runId)}`
+  );
+  assertCondition(noMskSummary.status === 200, `Wave 2 no-MSK summary expected 200, got ${noMskSummary.status}`);
+  assertCondition(noMskSummary.data.status === 'COMPLETED', `Wave 2 no-MSK summary expected COMPLETED, got ${noMskSummary.data.status}`);
+
+  const emptyUpload = await uploadCsvForIngestion(
+    `wave2_invalid_${Date.now()}`,
+    'empty.csv',
+    ''
+  );
+  assertCondition(emptyUpload.status === 400, `Wave 2 empty file expected 400, got ${emptyUpload.status}`);
+  assertCondition(emptyUpload.data.code === 'INVALID_FILE', `Wave 2 empty file expected INVALID_FILE, got ${emptyUpload.data.code}`);
+  assertCondition(Boolean(emptyUpload.data.runId), 'Wave 2 empty file should still return runId');
+
+  const badHeaderCsv = ['foo,bar', '1,2'].join('\n');
+  const badHeaderUpload = await uploadCsvForIngestion(
+    `wave2_badheader_${Date.now()}`,
+    'bad_headers.csv',
+    badHeaderCsv
+  );
+  assertCondition(badHeaderUpload.status === 400, `Wave 2 bad-header expected 400, got ${badHeaderUpload.status}`);
+  assertCondition(
+    badHeaderUpload.data.code === 'HEADER_VALIDATION_FAILED',
+    `Wave 2 bad-header expected HEADER_VALIDATION_FAILED, got ${badHeaderUpload.data.code}`
+  );
+  assertCondition((badHeaderUpload.data.failures?.length ?? 0) > 0, 'Wave 2 bad-header response should include failures');
+
+  console.log('  ✓ No-MSK path closes cleanly with mskFound=0');
+  console.log('  ✓ Empty and bad-header files fail cleanly with actionable error payloads');
+}
+
+async function testWave3ConsistencyLock() {
+  console.log('\n[WAVE 3] Consistency Lock (API / DB / Governance Surface)');
+
+  const csvSample = await readFile('claims_sample_ark_emp_1000_demo.csv', 'utf-8');
+  const employerName = `wave3_${Date.now()}`;
+  const upload = await uploadCsvForIngestion(
+    employerName,
+    'claims_sample_ark_emp_1000_demo.csv',
+    csvSample
+  );
+
+  assertCondition(upload.status === 202, `Wave 3 upload expected 202, got ${upload.status}`);
+  assertCondition(Boolean(upload.data.runId), 'Wave 3 upload should return runId');
+
+  const runId = String(upload.data.runId);
+  const summary = await fetchJson<IngestionSummaryResponse>(`${BASE_URL}/api/v1/ingestions/${runId}`);
+  assertCondition(summary.status === 200, `Wave 3 summary expected 200, got ${summary.status}`);
+  assertCondition(Boolean(summary.data.consistency), 'Wave 3 summary should include consistency block');
+  assertCondition(summary.data.consistency?.idsLinked === true, 'Wave 3 idsLinked should be true');
+  assertCondition(
+    summary.data.consistency?.workflowCountMatchesMsk === true,
+    'Wave 3 workflowCountMatchesMsk should be true'
+  );
+  assertCondition(summary.data.consistency?.valid === true, `Wave 3 consistency expected valid=true, errors=${summary.data.consistency?.errors.join('; ')}`);
+
+  const firstWorkflowId = summary.data.workflows?.[0]?.workflowId;
+  if (firstWorkflowId) {
+    const workflow = await pollWorkflowUntilTerminal(firstWorkflowId);
+    assertCondition(
+      workflow.ingestionRunId !== null && typeof workflow.ingestionRunId === 'string',
+      'Wave 3 workflow response should expose ingestionRunId linkage'
+    );
+  }
+
+  console.log('  ✓ Consistency checks passed for ids and run-workflow count alignment');
+}
+
 async function runAllE2ETests() {
   try {
     console.log('='.repeat(70));
@@ -723,6 +909,9 @@ async function runAllE2ETests() {
     await testDecisionActionImmediateAfterRoute();
     await testConsistencyAcrossAllSections();
     await testResponseCleanliness();
+    await testWave1StableHappyPathIngestion();
+    await testWave2ScenarioHardening();
+    await testWave3ConsistencyLock();
 
     console.log('\n' + '='.repeat(70));
     console.log('ALL E2E TESTS PASSED ✓');

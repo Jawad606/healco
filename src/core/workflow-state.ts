@@ -15,7 +15,10 @@ export const GovernanceStep = {
   DECISION: 'DECISION',
   ACTION: 'ACTION',
   FAILURE: 'FAILURE',
-  EVENT: 'EVENT'
+  EVENT: 'EVENT',
+  FILE_INGESTED: 'FILE_INGESTED',
+  RECORDS_PARSED: 'RECORDS_PARSED',
+  MSK_DETECTED: 'MSK_DETECTED'
 } as const;
 
 export type GovernanceStep = (typeof GovernanceStep)[keyof typeof GovernanceStep];
@@ -39,6 +42,8 @@ export type WorkflowPathway = {
 export type WorkflowDecision = {
   plan: string;
   expectedCare: string;
+  avoidedPath: string | null;
+  avoidedReason: string | null;
   rationale: {
     selectedBecause: string[];
     factors: {
@@ -65,6 +70,8 @@ export type WorkflowDecision = {
 export type WorkflowAction = {
   actualCare: string;
   isAdhered: boolean;
+  isDefaultPath: boolean;
+  overrideReason: string | null;
 };
 
 export type WorkflowContext = {

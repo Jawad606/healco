@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import * as workflowService from '../services/workflow.service';
 import * as governanceService from '../services/governance.service';
+import { buildCanonicalResponse, extractEventTimestamps } from '../services/canonical-response.service';
 
 const createSchema = z.object({
   idempotencyKey: z.string().min(1),
@@ -236,6 +237,8 @@ function mapDecision(context: Record<string, unknown>) {
   return {
     plan: toStringValue(decision.plan) ?? null,
     expectedCare: toStringValue(decision.expectedCare) ?? null,
+    avoidedPath: toStringValue(decision.avoidedPath) ?? null,
+    avoidedReason: toStringValue(decision.avoidedReason) ?? null,
     rationale: {
       selectedBecause: toStringArray(rationale?.selectedBecause),
       factors: {
@@ -273,6 +276,8 @@ function mapAction(
 
   return {
     actualCare,
+    isDefaultPath: toBooleanValue(action?.isDefaultPath) ?? null,
+    overrideReason: toStringValue(action?.overrideReason) ?? null,
     completedAt: workflow.completedAt
   };
 }
@@ -303,6 +308,7 @@ function mapAdherence(
 function normalizeWorkflowResponse(
   workflow: {
     id: string;
+    ingestionRunId: string | null;
     traceId: string;
     status: string;
     contextData: unknown;
@@ -315,9 +321,27 @@ function normalizeWorkflowResponse(
   }
 ) {
   const context = asRecord(workflow.contextData) ?? {};
+  const canonical = buildCanonicalResponse({
+    ingestionRunId: workflow.ingestionRunId,
+    workflowId: workflow.id,
+    traceId: workflow.traceId,
+    ingestionStatus: null,
+    workflowStatus: workflow.status,
+    totalProcessed: null,
+    mskFound: null,
+    ingestionStartedAt: null,
+    ingestionCompletedAt: null,
+    routeAt: null,
+    decisionAt: null,
+    actionAt: workflow.completedAt,
+    contextData: workflow.contextData,
+    workflowActualCare: workflow.actualCare,
+    workflowIsAdhered: workflow.isAdhered
+  });
 
   return {
     id: workflow.id,
+    ingestionRunId: workflow.ingestionRunId,
     traceId: workflow.traceId,
     status: workflow.status,
     input: mapWorkflowInput(context),
@@ -325,6 +349,7 @@ function normalizeWorkflowResponse(
     decision: mapDecision(context),
     action: mapAction(context, workflow),
     adherence: mapAdherence(context, workflow),
+    canonical,
     retryCount: workflow.retryCount,
     timestamps: {
       createdAt: workflow.createdAt,
@@ -635,10 +660,31 @@ export async function getWorkflowLogs(req: Request, res: Response) {
   });
 
   const { rawLogs, ...baseResponse } = normalized;
+  const stepTimes = extractEventTimestamps(
+    result.logs.map((log) => ({ step: String(log.step), createdAt: toDateValue(log.createdAt) }))
+  );
+  const canonical = buildCanonicalResponse({
+    ingestionRunId: workflow.ingestionRunId,
+    workflowId: workflow.id,
+    traceId: workflow.traceId,
+    ingestionStatus: null,
+    workflowStatus: workflow.status,
+    totalProcessed: null,
+    mskFound: null,
+    ingestionStartedAt: null,
+    ingestionCompletedAt: null,
+    routeAt: stepTimes.routeAt,
+    decisionAt: stepTimes.decisionAt,
+    actionAt: stepTimes.actionAt,
+    contextData: workflow.contextData,
+    workflowActualCare: workflow.actualCare,
+    workflowIsAdhered: workflow.isAdhered
+  });
 
   return res.json({
     workflowId: String(req.params.id),
     ...baseResponse,
+    canonical,
     ...(includeRaw ? { rawLogs } : {}),
     responseMeta: {
       includeQuery: req.query.include ?? null,

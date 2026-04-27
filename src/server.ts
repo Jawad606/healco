@@ -13,5 +13,5 @@ app.get('/health', (_req, res) => {
 app.use('/api/v1', v1Router);
 
 app.listen(config.port, () => {
-  // no-op startup log removed to keep scaffold quiet
+  console.log(`HealCo Workflow API running on http://localhost:${config.port}`);
 });

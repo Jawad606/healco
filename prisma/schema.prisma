@@ -16,9 +16,28 @@ enum WorkflowStatus {
   FAILED
 }
 
+enum IngestionRunStatus {
+  RECEIVED
+  PARSED
+  DETECTED
+  COMPLETED
+  FAILED
+}
+
+enum SourceFileType {
+  CSV
+  XML
+}
+
+enum IngestionRowStatus {
+  VALID
+  INVALID
+}
+
 model WorkflowRecord {
   id             String           @id @default(cuid())
   idempotencyKey  String           @unique
+  ingestionRunId  String?
   traceId         String
   status          WorkflowStatus   @default(INITIATED)
   contextData     Json
@@ -29,30 +48,104 @@ model WorkflowRecord {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   governanceLogs  GovernanceLog[]
+  ingestionRun    IngestionRun?    @relation(fields: [ingestionRunId], references: [id], onDelete: SetNull)
 
   @@index([status, createdAt])
+  @@index([ingestionRunId, createdAt])
 }
 
 model GovernanceLog {
-  id              String         @id @default(cuid())
-  workflowId      String
-  traceId         String
-  step            String
-  fromState       WorkflowStatus
-  toState         WorkflowStatus
-  actor           String
-  title           String
-  narrative       String
-  message         String
-  routingDecision Json?
-  decisionMade    Json?
-  actionTaken     Json?
-  adherenceResult Json?
-  payloadSnapshot Json
-  createdAt       DateTime       @default(now())
-  workflow        WorkflowRecord @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  id               String         @id @default(cuid())
+  workflowId       String?
+  ingestionRunId   String?
+  traceId          String
+  step             String
+  fromState        String
+  toState          String
+  actor            String
+  title            String
+  narrative        String
+  message          String
+  routingDecision  Json?
+  decisionMade     Json?
+  actionTaken      Json?
+  adherenceResult  Json?
+  payloadSnapshot  Json
+  createdAt        DateTime       @default(now())
+  workflow         WorkflowRecord? @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  ingestionRun     IngestionRun?   @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
 
   @@index([workflowId, createdAt])
+  @@index([ingestionRunId, createdAt])
   @@index([step, createdAt])
   @@index([workflowId, step])
+}
+
+model IngestionRun {
+  id                 String               @id @default(cuid())
+  runId              String               @unique
+  employerName       String
+  sourceFileName     String
+  sourceFileType     SourceFileType
+  sourceChecksum     String
+  status             IngestionRunStatus   @default(RECEIVED)
+  totalRows          Int                  @default(0)
+  validRows          Int                  @default(0)
+  invalidRows        Int                  @default(0)
+  totalMskFlags      Int                  @default(0)
+  errorSummary       String?
+  startedAt          DateTime             @default(now())
+  completedAt        DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  records            IngestedClaimRecord[]
+  detectionResults   MskDetectionResult[]
+  workflows          WorkflowRecord[]
+  governanceLogs     GovernanceLog[]
+
+  @@index([status, createdAt])
+  @@index([employerName, createdAt])
+  @@index([createdAt])
+  @@unique([employerName, sourceChecksum])
+}
+
+model IngestedClaimRecord {
+  id                String             @id @default(cuid())
+  ingestionRunId    String
+  rowNumber         Int
+  memberId          String?
+  claimId           String?
+  caseId            String?
+  diagnosisCode     String?
+  procedureCode     String?
+  utilizationType   String?
+  serviceDate       DateTime?
+  billedAmount      Decimal?
+  paidAmount        Decimal?
+  normalizedPayload Json
+  rowStatus         IngestionRowStatus
+  rowErrors         Json
+  isMskFlagged      Boolean            @default(false)
+  mskReason         String?
+  createdAt         DateTime           @default(now())
+  ingestionRun      IngestionRun       @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
+
+  @@index([ingestionRunId, rowNumber])
+  @@index([ingestionRunId, rowStatus])
+  @@index([ingestionRunId, isMskFlagged])
+}
+
+model MskDetectionResult {
+  id               String       @id @default(cuid())
+  ingestionRunId   String
+  detectorVersion  String
+  totalProcessed   Int
+  mskFound         Int
+  flaggedMemberIds Json
+  flaggedCaseIds   Json
+  detectionReasons Json
+  createdAt        DateTime     @default(now())
+  ingestionRun     IngestionRun @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
+
+  @@index([ingestionRunId, createdAt])
 }

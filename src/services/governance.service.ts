@@ -1,15 +1,15 @@
 import { GovernanceRepository } from '../repositories/governance.repository';
 import { Prisma } from '@prisma/client';
-import { GovernanceStep, WorkflowStatus } from '../core/workflow-state';
 
 const repo = new GovernanceRepository();
 
 type TransitionPayload = {
-  workflowId: string;
+  workflowId?: string | null;
+  ingestionRunId?: string | null;
   traceId: string;
-  step: GovernanceStep;
-  fromState: WorkflowStatus;
-  toState: WorkflowStatus;
+  step: string;
+  fromState: string;
+  toState: string;
   actor: string;
   title: string;
   narrative: string;
@@ -71,35 +71,28 @@ function formatMessage(data: TransitionPayload) {
   return data.narrative;
 }
 
-export async function logTransition(data: {
-  workflowId: string;
-  traceId: string;
-  step: GovernanceStep;
-  fromState: WorkflowStatus;
-  toState: WorkflowStatus;
-  actor: string;
-  title: string;
-  narrative: string;
-  message?: string;
-  routingDecision?: Record<string, unknown>;
-  decisionMade?: Record<string, unknown>;
-  actionTaken?: Record<string, unknown>;
-  adherenceResult?: Record<string, unknown>;
-  payloadSnapshot: Record<string, unknown>;
-}) {
+export async function logTransition(data: TransitionPayload, tx?: Prisma.TransactionClient) {
   return repo.create({
     ...data,
+    workflowId: data.workflowId ?? null,
+    ingestionRunId: data.ingestionRunId ?? null,
     routingDecision: toInputJsonValue(data.routingDecision),
     decisionMade: toInputJsonValue(data.decisionMade),
     actionTaken: toInputJsonValue(data.actionTaken),
     adherenceResult: toInputJsonValue(data.adherenceResult),
     payloadSnapshot: data.payloadSnapshot as Prisma.InputJsonValue,
     message: formatMessage(data)
-  });
+  }, tx);
 }
 
 export async function getLogsWithSummary(workflowId: string) {
   const logs = await repo.findByWorkflowId(workflowId);
+  const summary = logs.map((log) => log.narrative).filter(Boolean).join(' → ');
+  return { summary, logs };
+}
+
+export async function getIngestionLogsWithSummary(ingestionRunId: string) {
+  const logs = await repo.findByIngestionRunId(ingestionRunId);
   const summary = logs.map((log) => log.narrative).filter(Boolean).join(' → ');
   return { summary, logs };
 }

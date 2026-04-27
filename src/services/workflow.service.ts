@@ -8,12 +8,14 @@ const repo = new WorkflowRepository();
 export async function startWorkflow(input: {
   idempotencyKey: string;
   payload: WorkflowInput;
+  ingestionRunId?: string;
 }) {
   const existing = await repo.findByIdempotencyKey(input.idempotencyKey);
   if (existing) return existing;
 
   const workflow = await repo.create({
     idempotencyKey: input.idempotencyKey,
+    ingestionRunId: input.ingestionRunId,
     traceId: uuid(),
     status: WorkflowStatus.INITIATED,
     contextData: { input: input.payload } satisfies WorkflowContext

@@ -26,6 +26,10 @@ const worker = new Worker(
   }
 );
 
+worker.on('ready', () => {
+  console.log('Workflow processor worker is ready and connected to Redis.');
+});
+
 worker.on('failed', async (_job, error) => {
   const workflowId = String(_job?.data?.workflowId ?? '');
   if (!workflowId) return;
@@ -46,5 +50,7 @@ worker.on('failed', async (_job, error) => {
     payloadSnapshot: workflow.contextData as Record<string, unknown>
   });
 });
+
+console.log('Workflow processor starting...');
 
 void worker;

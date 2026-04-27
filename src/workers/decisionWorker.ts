@@ -66,6 +66,8 @@ function decidePlan(input: {
       return {
         plan: 'IMAGING_FIRST',
         expectedCare: 'Imaging referral created',
+        avoidedPath: 'HOSPITAL_FIRST',
+        avoidedReason: 'Hospital-first pathway avoided because outpatient imaging can address diagnostic needs without inpatient admission.',
         rationale: {
           selectedBecause: [
             input.redFlags
@@ -95,6 +97,8 @@ function decidePlan(input: {
     return {
       plan: 'PT_FIRST',
       expectedCare: 'PT referral created',
+      avoidedPath: 'HOSPITAL_FIRST',
+      avoidedReason: 'Hospital-first pathway avoided because conservative PT management is appropriate given mild symptoms and no red flags.',
       rationale: {
         selectedBecause: [
           'Pain score is mild to moderate and no red flags are present.',
@@ -125,6 +129,8 @@ function decidePlan(input: {
   return {
     plan: 'GENERAL_REVIEW',
     expectedCare: 'General referral created',
+    avoidedPath: 'HOSPITAL_FIRST',
+    avoidedReason: 'Hospital-first pathway avoided because symptoms do not meet inpatient admission criteria.',
     rationale: {
       selectedBecause: ['Symptoms did not match a specialized pathway with sufficient confidence.'],
       factors: decisionContext

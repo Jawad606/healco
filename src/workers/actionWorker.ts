@@ -17,12 +17,16 @@ export async function actionWorker(workflowId: string) {
 
   const actualCare = decision.expectedCare;
   const isAdhered = actualCare === decision.expectedCare;
+  const isDefaultPath = actualCare === decision.expectedCare;
+  const overrideReason: string | null = isDefaultPath ? null : 'Manual override applied';
 
   const updatedContext: WorkflowContext = {
     ...context,
     action: {
       actualCare,
-      isAdhered
+      isAdhered,
+      isDefaultPath,
+      overrideReason
     }
   };
 
@@ -38,7 +42,9 @@ export async function actionWorker(workflowId: string) {
     title: 'Action Completed',
     narrative: `${actualCare} completed`,
     actionTaken: {
-      actualCare
+      actualCare,
+      isDefaultPath,
+      overrideReason
     } as Record<string, unknown>,
     adherenceResult: {
       isAdhered,
