@@ -12,7 +12,7 @@ import { prisma } from '../core/db';
 const repo = new IngestionRepository();
 const governanceRepo = new GovernanceRepository();
 
-const REQUIRED_HEADERS = [
+const LEGACY_REQUIRED_HEADERS = [
   'claim_id',
   'employer_id',
   'member_id',
@@ -27,7 +27,34 @@ const REQUIRED_HEADERS = [
   'claim_source'
 ] as const;
 
+const EMPLOYER_PACKET_REQUIRED_HEADERS = [
+  'claim_id',
+  'member_id',
+  'date_of_service',
+  'procedure_code',
+  'diagnosis_code',
+  'allowed_amount',
+  'plan_paid'
+] as const;
+
+type InputSchema = 'LEGACY_CLAIMS' | 'EMPLOYER_PACKET';
+
 type CsvRow = Record<string, string>;
+
+type NormalizedRow = {
+  claimId: string | null;
+  memberId: string | null;
+  caseId: string | null;
+  diagnosisCode: string | null;
+  procedureCode: string | null;
+  utilizationType: string | null;
+  serviceDate: Date | null;
+  billedAmount: number | null;
+  paidAmount: number | null;
+  normalizedPayload: Record<string, unknown>;
+  rowStatus: 'VALID' | 'INVALID';
+  rowErrors: string[];
+};
 
 type DetectionOutcome = {
   isMskFlagged: boolean;
@@ -59,8 +86,25 @@ function parseServiceDate(value: string | undefined): Date | null {
   return parsed;
 }
 
-function validateHeaders(headers: string[]): string[] {
-  const missing = REQUIRED_HEADERS.filter((header) => !headers.includes(header));
+function hasAllHeaders(headers: string[], requiredHeaders: readonly string[]) {
+  return requiredHeaders.every((header) => headers.includes(header));
+}
+
+function resolveInputSchema(headers: string[]): InputSchema | null {
+  if (hasAllHeaders(headers, LEGACY_REQUIRED_HEADERS)) {
+    return 'LEGACY_CLAIMS';
+  }
+
+  if (hasAllHeaders(headers, EMPLOYER_PACKET_REQUIRED_HEADERS)) {
+    return 'EMPLOYER_PACKET';
+  }
+
+  return null;
+}
+
+function validateHeaders(headers: string[], schema: InputSchema): string[] {
+  const requiredHeaders = schema === 'LEGACY_CLAIMS' ? LEGACY_REQUIRED_HEADERS : EMPLOYER_PACKET_REQUIRED_HEADERS;
+  const missing = requiredHeaders.filter((header) => !headers.includes(header));
   return missing.map((header) => `Missing required header: ${header}`);
 }
 
@@ -89,6 +133,106 @@ function detectMsk(row: {
   }
 
   return { isMskFlagged: false, reason: null };
+}
+
+function normalizeLegacyRow(row: CsvRow): NormalizedRow {
+  const rowErrors: string[] = [];
+
+  const claimId = row.claim_id?.trim() || null;
+  const memberId = row.member_id?.trim() || null;
+  const serviceDate = parseServiceDate(row.date_of_service);
+  const billedAmount = parseAmount(row.billed_amount);
+  const paidAmount = parseAmount(row.paid_amount);
+
+  if (!claimId) {
+    rowErrors.push('claim_id is required');
+  }
+
+  if (!memberId) {
+    rowErrors.push('member_id is required');
+  }
+
+  if (!serviceDate) {
+    rowErrors.push('date_of_service is invalid');
+  }
+
+  if (billedAmount === null) {
+    rowErrors.push('billed_amount is invalid');
+  }
+
+  if (paidAmount === null) {
+    rowErrors.push('paid_amount is invalid');
+  }
+
+  return {
+    claimId,
+    memberId,
+    caseId: row.claim_id?.trim() || null,
+    diagnosisCode: row.icd10_code?.trim() || null,
+    procedureCode: row.cpt_code?.trim() || null,
+    utilizationType: row.provider_type?.trim() || null,
+    serviceDate,
+    billedAmount,
+    paidAmount,
+    normalizedPayload: row,
+    rowStatus: rowErrors.length ? 'INVALID' : 'VALID',
+    rowErrors
+  };
+}
+
+function normalizeEmployerPacketRow(row: CsvRow, employerName: string, fileName: string): NormalizedRow {
+  const rowErrors: string[] = [];
+
+  const claimId = row.claim_id?.trim() || null;
+  const memberId = row.member_id?.trim() || null;
+  const serviceDate = parseServiceDate(row.date_of_service);
+  const billedAmount = parseAmount(row.allowed_amount);
+  const paidAmount = parseAmount(row.plan_paid);
+
+  if (!claimId) {
+    rowErrors.push('claim_id is required');
+  }
+
+  if (!memberId) {
+    rowErrors.push('member_id is required');
+  }
+
+  if (!serviceDate) {
+    rowErrors.push('date_of_service is invalid');
+  }
+
+  if (billedAmount === null) {
+    rowErrors.push('allowed_amount is invalid');
+  }
+
+  if (paidAmount === null) {
+    rowErrors.push('plan_paid is invalid');
+  }
+
+  return {
+    claimId,
+    memberId,
+    caseId: row.claim_id?.trim() || null,
+    diagnosisCode: row.diagnosis_code?.trim() || null,
+    procedureCode: row.procedure_code?.trim() || null,
+    utilizationType: row.site_of_care?.trim() || row.procedure_category?.trim() || row.provider_name?.trim() || null,
+    serviceDate,
+    billedAmount,
+    paidAmount,
+    normalizedPayload: {
+      ...row,
+      employer_id: employerName,
+      source_file: row.source_file?.trim() || fileName,
+      claim_source: row.source_file?.trim() || fileName,
+      provider_type: row.site_of_care?.trim() || row.procedure_category?.trim() || row.provider_name?.trim() || null,
+      cpt_code: row.procedure_code?.trim() || null,
+      icd10_code: row.diagnosis_code?.trim() || null,
+      billed_amount: row.allowed_amount?.trim() || null,
+      paid_amount: row.plan_paid?.trim() || null
+    },
+    rowStatus: rowErrors.length ? 'INVALID' : 'VALID',
+    rowErrors
+  };
 }
 
 function mapWorkflowPayloadFromRecord(record: {
@@ -218,7 +362,32 @@ export async function ingestEmployerFile(input: {
     }
 
     const headers = Object.keys(csvRecords[0]);
-    const headerErrors = validateHeaders(headers);
+    const schema = resolveInputSchema(headers);
+    if (!schema) {
+      const legacyErrors = LEGACY_REQUIRED_HEADERS.filter((header) => !headers.includes(header)).map(
+        (header) => `Missing required header: ${header}`
+      );
+      const employerPacketErrors = EMPLOYER_PACKET_REQUIRED_HEADERS.filter((header) => !headers.includes(header)).map(
+        (header) => `Missing required header: ${header}`
+      );
+      const headerErrors = [...legacyErrors, ...employerPacketErrors];
+      await repo.updateRun(run.id, {
+        status: 'FAILED',
+        errorSummary: headerErrors.join('; '),
+        completedAt: new Date()
+      });
+
+      return {
+        ok: false as const,
+        status: 400,
+        code: 'HEADER_VALIDATION_FAILED',
+        runId: run.runId,
+        message: 'CSV header validation failed.',
+        failures: headerErrors.map((reason) => ({ rowNumber: 0, reason }))
+      };
+    }
+
+    const headerErrors = validateHeaders(headers, schema);
     if (headerErrors.length > 0) {
       await repo.updateRun(run.id, {
         status: 'FAILED',
@@ -238,41 +407,26 @@ export async function ingestEmployerFile(input: {
 
     const records: IngestionRecordCreateInput[] = csvRecords.map((row, index) => {
       const rowNumber = index + 2;
-      const rowErrors: string[] = [];
-
-      const claimId = row.claim_id?.trim() || null;
-      const memberId = row.member_id?.trim() || null;
-      const serviceDate = parseServiceDate(row.date_of_service);
-      const billedAmount = parseAmount(row.billed_amount);
-      const paidAmount = parseAmount(row.paid_amount);
-
-      if (!claimId) {
-        rowErrors.push('claim_id is required');
-      }
-
-      if (!memberId) {
-        rowErrors.push('member_id is required');
-      }
-
-      if (!serviceDate) {
-        rowErrors.push('date_of_service is invalid');
-      }
+      const normalizedRow =
+        schema === 'LEGACY_CLAIMS'
+          ? normalizeLegacyRow(row)
+          : normalizeEmployerPacketRow(row, input.employerName, input.fileName);
 
       return {
         ingestionRunId: run.id,
         rowNumber,
-        memberId,
-        claimId,
-        caseId: row.claim_id?.trim() || null,
-        diagnosisCode: row.icd10_code?.trim() || null,
-        procedureCode: row.cpt_code?.trim() || null,
-        utilizationType: row.provider_type?.trim() || null,
-        serviceDate,
-        billedAmount,
-        paidAmount,
-        normalizedPayload: row,
-        rowStatus: rowErrors.length ? 'INVALID' : 'VALID',
-        rowErrors
+        memberId: normalizedRow.memberId,
+        claimId: normalizedRow.claimId,
+        caseId: normalizedRow.caseId,
+        diagnosisCode: normalizedRow.diagnosisCode,
+        procedureCode: normalizedRow.procedureCode,
+        utilizationType: normalizedRow.utilizationType,
+        serviceDate: normalizedRow.serviceDate,
+        billedAmount: normalizedRow.billedAmount,
+        paidAmount: normalizedRow.paidAmount,
+        normalizedPayload: normalizedRow.normalizedPayload,
+        rowStatus: normalizedRow.rowStatus,
+        rowErrors: normalizedRow.rowErrors
       };
     });
 

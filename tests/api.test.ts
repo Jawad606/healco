@@ -773,12 +773,12 @@ async function testResponseCleanliness() {
 async function testWave1StableHappyPathIngestion() {
   console.log('\n[WAVE 1] Stable Happy-Path Ingestion');
 
-  const csvSample = await readFile('claims_sample_ark_emp_1000_demo.csv', 'utf-8');
+  const csvSample = await readFile('vagabond_propco_employer_data_packet - Claims_2025.csv', 'utf-8');
   const employerName = `wave1_${Date.now()}`;
 
   const upload = await uploadCsvForIngestion(
     employerName,
-    'claims_sample_ark_emp_1000_demo.csv',
+    'vagabond_propco_employer_data_packet - Claims_2025.csv',
     csvSample
   );
 
@@ -860,11 +860,11 @@ async function testWave2ScenarioHardening() {
 async function testWave3ConsistencyLock() {
   console.log('\n[WAVE 3] Consistency Lock (API / DB / Governance Surface)');
 
-  const csvSample = await readFile('claims_sample_ark_emp_1000_demo.csv', 'utf-8');
+  const csvSample = await readFile('vagabond_propco_employer_data_packet - Claims_2025.csv', 'utf-8');
   const employerName = `wave3_${Date.now()}`;
   const upload = await uploadCsvForIngestion(
     employerName,
-    'claims_sample_ark_emp_1000_demo.csv',
+    'vagabond_propco_employer_data_packet - Claims_2025.csv',
     csvSample
   );
 
